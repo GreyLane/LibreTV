@@ -106,6 +106,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  hotRecommend: (page = 0, seeds: string[] = [], signal?: AbortSignal) => request<DoubanResponse & { nextPage: number | null }>(`/api/recommend-hot?page=${page}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seeds }), signal }),
   status: () => request<AuthStatusResponse>('/api/status'),
 
   login: (password: string) =>

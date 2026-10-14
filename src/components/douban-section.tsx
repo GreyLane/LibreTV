@@ -1,7 +1,10 @@
 'use client';
 
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db, MAX_HISTORY } from '@/lib/db';
+import { normalizedTitle, recommendationSeeds } from '@/lib/recommendation-profile';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/client-api';
 import { useAppStore } from '@/lib/store';
 import { cn } from '@/lib/utils';
@@ -138,6 +141,7 @@ function BangumiView({ onPick }: { onPick: (title: string) => void }) {
 }
 
 const HOT_LISTS = [
+  { id: 'douban_hot', label: '热门推荐' },
   { id: 'douban_movie_weekly', label: '电影周榜' },
   { id: 'douban_tv_chinese', label: '国产剧周榜' },
   { id: 'douban_tv_global', label: '海外剧周榜' },
@@ -153,6 +157,7 @@ function HotListView({ onPick }: { onPick: (title: string) => void }) {
   const query = useQuery({
     queryKey: ['hot-list', listId],
     queryFn: ({ signal }) => api.hotList(listId, signal),
+    enabled: listId !== 'douban_hot',
   });
 
   const items = query.data?.items ?? [];
@@ -167,10 +172,15 @@ function HotListView({ onPick }: { onPick: (title: string) => void }) {
         ))}
       </div>
 
-      {query.isError ? (
-        <p className="text-center text-sm text-faint py-8">推荐内容加载失败，可稍后重试或在设置中关闭</p>
+      {listId === 'douban_hot' ? <PopularFeed onPick={onPick} /> : query.isError ? (
+        <div className="text-center text-sm text-faint py-8">
+          <p>推荐内容加载失败，请稍后重试</p>
+          <button className="mt-2 text-accent" onClick={() => void query.refetch()}>重新加载</button>
+        </div>
       ) : query.isLoading ? (
         <GridSkeleton />
+      ) : items.length === 0 ? (
+        <p className="text-center text-sm text-faint py-8">暂无推荐内容</p>
       ) : (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2.5">
           {items.map((item) => (
@@ -180,6 +190,49 @@ function HotListView({ onPick }: { onPick: (title: string) => void }) {
       )}
     </section>
   );
+}
+
+function PopularFeed({ onPick }: { onPick: (title: string) => void }) {
+  const sentinel = useRef<HTMLDivElement>(null);
+  const history = useLiveQuery(() => db.history.orderBy('timestamp').reverse().limit(MAX_HISTORY).toArray());
+  const seeds = recommendationSeeds(history ?? []);
+  const watched = new Set((history ?? []).filter((entry) => entry.playbackPosition >= 60 || entry.episodeIndex > 0).map((entry) => normalizedTitle(entry.title)));
+  const query = useInfiniteQuery({
+    queryKey: ['popular-feed', seeds],
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) => api.hotRecommend(pageParam, seeds, signal),
+    getNextPageParam: (lastPage) => lastPage.nextPage ?? undefined,
+    enabled: history !== undefined,
+    retry: 1,
+  });
+  const { fetchNextPage, hasNextPage, isFetchingNextPage, isFetchNextPageError } = query;
+  useEffect(() => {
+    const element = sentinel.current;
+    if (!element || !hasNextPage || isFetchingNextPage || isFetchNextPageError) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) void fetchNextPage();
+    }, { rootMargin: '400px' });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isFetchNextPageError]);
+  const seen = new Set<string>();
+  const items = (query.data?.pages.flatMap((page) => page.items) ?? []).filter((item) => {
+    const title = normalizedTitle(item.title);
+    if (seen.has(item.id) || seen.has(title) || watched.has(title)) return false;
+    seen.add(item.id); seen.add(title);
+    return true;
+  });
+  if (history === undefined || query.isLoading) return <GridSkeleton />;
+  if (query.isError && !query.data) return <div className="text-center py-8 text-sm text-faint">推荐加载失败 <button className="text-accent" onClick={() => void query.refetch()}>重试</button></div>;
+  return <>
+    <p className="mb-3 text-xs text-faint">{seeds.length ? '综合热门 · 为你补充相似推荐' : '综合热门 · 电影、剧集、综艺、动漫'}</p>
+    <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2.5">
+      {items.map((item) => <DoubanCard key={item.id} item={item} onClick={() => onPick(item.title)} />)}
+    </div>
+    <div ref={sentinel} className="py-6 text-center text-sm text-faint" aria-live="polite">
+      {isFetchingNextPage ? '正在加载更多…' : isFetchNextPageError ? <button className="text-accent" onClick={() => void fetchNextPage()}>加载失败，点击重试</button> : hasNextPage ? <button onClick={() => void fetchNextPage()}>加载更多</button> : '已浏览全部热门推荐'}
+    </div>
+  </>;
 }
 
 function GridSkeleton() {
